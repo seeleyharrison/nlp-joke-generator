@@ -3,7 +3,7 @@
     This file prepares/processes our joke data into inputs for our
     RNN. It handles the following steps:
 
-    1) Read in and clean both the kaggle and rJokes copruses
+    1) Read in and clean both the kaggle and rJokes corpuses
     2) Tokenizes each dataset by our NGRAM parameter
     3) Generates word embeddings from both corpuses
     4) Encode tokens into indices
@@ -16,13 +16,13 @@ from gensim.models import Word2Vec
 import pandas as pd
 import re
 import nltk
-from keras_preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.text import Tokenizer
 from gensim.models import KeyedVectors
 from keras.utils import to_categorical
 import numpy as np
 nltk.download('punkt')
 
-DATA_DIR = "../data"
+DATA_DIR = "../../data"
 MODEL_DIR = "../models"
 SENTENCE_BEGIN = "<s>"
 SENTENCE_END = "</s>"
