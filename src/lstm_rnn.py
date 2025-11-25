@@ -9,12 +9,15 @@
     5) Provide text generation functionality
 '''
 
+import warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning)  # Suppress gensim NumPy warnings
+
 import numpy as np
-from keras.models import Sequential, load_model
-from keras.layers import Dense, LSTM, Dropout
-from keras.callbacks import ModelCheckpoint, EarlyStopping
-from keras.optimizers import Adam
-from keras.utils import to_categorical
+from tensorflow.keras.models import Sequential, load_model
+from tensorflow.keras.layers import Dense, LSTM, Dropout
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.utils import to_categorical
 import pickle
 from prepare_data import (
     read_kjokes_data, 
@@ -32,9 +35,9 @@ from prepare_data import (
 )
 
 # Training parameters
-EPOCHS = 2
-LEARNING_RATE = 0.0015
-LSTM_UNITS = 128
+EPOCHS = 3  # increased from 2 for better learning
+LEARNING_RATE = 0.001  # turned fown for more stable training
+LSTM_UNITS = 64  # Reduced from 128 for faster training
 DROPOUT_RATE = 0.2
 
 def build_model(timesteps, embedding_dim, vocab_size, lstm_units=LSTM_UNITS, dropout_rate=DROPOUT_RATE):
@@ -80,8 +83,9 @@ def train_model(model, data_gen, steps_per_epoch, epochs=EPOCHS):
         Training history
     '''
     # Create checkpoint to save best model
+    # Use .h5 format for compatibility with Keras 3.x
     checkpoint = ModelCheckpoint(
-        f"{MODEL_DIR}/best_model.keras",
+        f"{MODEL_DIR}/best_model.h5",
         monitor='loss',
         verbose=1,
         save_best_only=True,
@@ -91,7 +95,7 @@ def train_model(model, data_gen, steps_per_epoch, epochs=EPOCHS):
     # Early stopping to prevent overfitting
     early_stop = EarlyStopping(
         monitor='loss',
-        patience=5,
+        patience=3,  # 5->3 for more reasonable training time
         verbose=1,
         mode='min'
     )
@@ -107,9 +111,29 @@ def train_model(model, data_gen, steps_per_epoch, epochs=EPOCHS):
     
     return history
 
-def generate_text(model, tokenizer, index_to_embedding, seed_text, num_words=50, ngram=NGRAM):
+def sample_with_temperature(preds, temperature=1.0):
     '''
-    Generates text using the trained model
+    Sample from preds using temperature for diversity
+    higher temp = more random, kower temp = more deterministic
+    Args:
+        preds: prediction probabilities from model
+        temperature: sampling temp
+    Returns:
+        sampled index
+    '''
+    preds = np.asarray(preds).astype('float64')
+    if temperature == 0:
+        return np.argmax(preds)
+    # add temperature scaling to make it more random or deterministic
+    preds = np.log(preds + 1e-8) / temperature
+    exp_preds = np.exp(preds)
+    preds = exp_preds / np.sum(exp_preds)
+    # sample from the distribution
+    return np.random.choice(len(preds), p=preds)
+
+def generate_text(model, tokenizer, index_to_embedding, seed_text, vocab_size, num_words=50, ngram=NGRAM, temperature=0.8):
+    '''
+    Generates text using the trained model with temperature sampling
     Args:
         model: trained Keras model
         tokenizer: fitted tokenizer from prepare_data
@@ -117,6 +141,7 @@ def generate_text(model, tokenizer, index_to_embedding, seed_text, num_words=50,
         seed_text (str): initial text to start generation
         num_words (int): number of words to generate
         ngram (int): ngram size used in training
+        temperature (float): sampling temperature (0.7-1.2 works well)
     Returns:
         Generated text string
     '''
@@ -127,7 +152,7 @@ def generate_text(model, tokenizer, index_to_embedding, seed_text, num_words=50,
     
     generated_text = seed_text
     
-    for _ in range(num_words):
+    for i in range(num_words):
         # Get the last (ngram-1) tokens
         if len(tokens) < ngram - 1:
             # Pad with sentence begin tokens if needed
@@ -138,31 +163,73 @@ def generate_text(model, tokenizer, index_to_embedding, seed_text, num_words=50,
         # Convert tokens to indices
         encoded_context = tokenizer.texts_to_sequences([context])[0]
         
+        # If empty sequence, try using OOV token
+        if not encoded_context:
+            encoded_context = [1] * (ngram - 1)  # Use OOV tokens
+        
+        # Filter out padding tokens (0) and ensure we have enough context
+        encoded_context = [idx for idx in encoded_context if idx > 0]  # Remove padding tokens
+        
         # Handle unknown words (not in vocabulary)
         if len(encoded_context) < ngram - 1:
-            # If some words are unknown, we can't make a prediction
-            break
+            # Pad with OOV token (1) if needed
+            encoded_context = [1] * (ngram - 1 - len(encoded_context)) + encoded_context
+        
+        # Ensure we have exactly ngram-1 tokens
+        encoded_context = encoded_context[-(ngram-1):]
         
         # Convert indices to embeddings (3D: batch_size=1, timesteps, embedding_dim)
-        embeddings = [index_to_embedding[idx] for idx in encoded_context if idx in index_to_embedding]
+        embeddings = []
+        for idx in encoded_context:
+            if idx in index_to_embedding:
+                embeddings.append(index_to_embedding[idx])
+            elif idx == 1:  # OOV token
+                # Use a zero vector for OOV
+                if len(embeddings) > 0:
+                    embeddings.append(np.zeros_like(embeddings[0]))
+                else:
+                    embeddings.append(np.zeros(100))  # Default embedding dim
+            else:
+                # Unknown index, use OOV
+                if len(embeddings) > 0:
+                    embeddings.append(np.zeros_like(embeddings[0]))
+                else:
+                    embeddings.append(np.zeros(100))
+        
         if len(embeddings) < ngram - 1:
             break
         
         # Shape: (1, timesteps, embedding_dim)
         embedding_sequence = np.array([embeddings])
         
-        # Predict next word
+        # Predict next word with temperature sampling
         predictions = model.predict(embedding_sequence, verbose=0)
-        predicted_index = np.argmax(predictions[0])
+        predicted_index = sample_with_temperature(predictions[0], temperature)
         
-        # Get the word for this index
-        predicted_word = None
-        for word, index in tokenizer.word_index.items():
-            if index == predicted_index:
-                predicted_word = word
-                break
+        # Handle padding token (index 0) - skip it
+        if predicted_index == 0:
+            # Try to sample again, excluding index 0
+            probs = predictions[0].copy()
+            probs[0] = 0  # Set padding probability to 0
+            probs = probs / np.sum(probs)  # Renormalize
+            predicted_index = sample_with_temperature(probs, temperature)
         
-        if predicted_word is None or predicted_word == SENTENCE_END:
+        # Ensure predicted_index is within valid range
+        if predicted_index >= vocab_size or predicted_index < 0:
+            break
+        
+        # Get the word for this index using reverse mapping
+        # Create reverse index mapping if it doesn't exist
+        if not hasattr(tokenizer, 'index_word'):
+            tokenizer.index_word = {index: word for word, index in tokenizer.word_index.items()}
+        
+        # Look up the word
+        predicted_word = tokenizer.index_word.get(predicted_index, None)
+        
+        if predicted_word is None:
+            break
+        
+        if predicted_word == SENTENCE_END or predicted_word == SENTENCE_BEGIN:
             break
         
         # Handle space character replacement
@@ -180,18 +247,19 @@ if __name__ == "__main__":
     print("Loading and preparing data...")
     print("=" * 50)
     
-    # Load data
+    # Load data (limited for faster training)
     kaggle_jokes = read_kjokes_data()
-    rJokes_scores, rJokes = read_rjokes_data("lightweight.tsv")
+    rJokes_scores, rJokes = read_rjokes_data("train.tsv", max_jokes=2000)  # Limit to 2000 jokes
     all_jokes = kaggle_jokes + rJokes
     
     # Create embeddings
     word_embeddings = create_word_embeddings(all_jokes, save=True, fp=MODEL_DIR)
     
-    # Encode words
-    encoded_words, word_tokenizer = encode_as_indices(all_jokes)
-    vocab_size = len(word_tokenizer.word_index) + 1
-    print(f"\nVocabulary size: {vocab_size}")
+    # Encode words (limit to 10000 most frequent words)
+    encoded_words, word_tokenizer = encode_as_indices(all_jokes, max_vocab_size=10000)
+    # Ensure vocab_size matches the limited vocabulary
+    vocab_size = len(word_tokenizer.word_index) + 1  # +1 for padding token at index 0
+    print(f"\nVocabulary size: {vocab_size} (limited from full vocabulary)")
     
     # Generate training samples
     training_samples = generate_ngram_training_samples(encoded_words, NGRAM)
@@ -240,8 +308,8 @@ if __name__ == "__main__":
     # Train model
     history = train_model(model, data_gen, steps_per_epoch, epochs=EPOCHS)
     
-    # Save final model
-    model.save(f"{MODEL_DIR}/final_model.keras")
+    # Save final model (use .h5 for compatibility)
+    model.save(f"{MODEL_DIR}/final_model.h5")
     print(f"\nModel saved to {MODEL_DIR}/final_model.keras")
     
     # Save tokenizer for later use
@@ -253,16 +321,34 @@ if __name__ == "__main__":
     print("Generating sample text...")
     print("=" * 50)
     
-    # Test text generation
+    # Test text generation WITH different temperatures
     seed_texts = ["why did the", "a man walks into", "what do you call"]
     
+    print("\nGenerating with temperature=0.7 (more focused):")
     for seed in seed_texts:
         generated = generate_text(
             model, 
             word_tokenizer, 
             word_index_to_embedding, 
-            seed, 
-            num_words=20
+            seed,
+            vocab_size,
+            num_words=25,
+            temperature=0.7
+        )
+        print(f"\nSeed: '{seed}'")
+        print(f"Generated: {generated}")
+    
+    print("\n" + "-" * 50)
+    print("Generating with temperature=1.0 (balanced):")
+    for seed in seed_texts:
+        generated = generate_text(
+            model, 
+            word_tokenizer, 
+            word_index_to_embedding, 
+            seed,
+            vocab_size,
+            num_words=25,
+            temperature=1.0
         )
         print(f"\nSeed: '{seed}'")
         print(f"Generated: {generated}")

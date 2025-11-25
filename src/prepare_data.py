@@ -18,16 +18,16 @@ import re
 import nltk
 from tensorflow.keras.preprocessing.text import Tokenizer
 from gensim.models import KeyedVectors
-from keras.utils import to_categorical
+from tensorflow.keras.utils import to_categorical
 import numpy as np
 nltk.download('punkt')
 
-DATA_DIR = "../../data"
-MODEL_DIR = "../models"
+DATA_DIR = "data"  # Changed from "../../data" since script runs from project root
+MODEL_DIR = "models"  # Changed from "../models" since script runs from project root
 SENTENCE_BEGIN = "<s>"
 SENTENCE_END = "</s>"
-NGRAM = 3
-BATCH_SIZE = 3
+NGRAM = 5  # 3->5 for better context window
+BATCH_SIZE = 32  # 3->32 for more stable training
 
 '''
     Tokenize a single string. Glue on the appropriate number of 
@@ -75,10 +75,12 @@ def tokenize_line(line: str, ngram: int,
         scores for each joke
         list of lists - each inner list is a single joke tokenized
 '''
-def read_rjokes_data(file):
-    
+def read_rjokes_data(file, max_jokes=2000):
+    '''
+    Reads in jokes from rJokes dataset, limiting to max_jokes for faster training
+    '''
     with open(f"{DATA_DIR}/{file}", 'r', encoding='utf-8') as f:  # Add encoding='utf-8'
-        joke_lines = f.readlines()
+        joke_lines = f.readlines()[:max_jokes]  # Limit number of jokes loaded
 
     scores = []
     tokens = []
@@ -98,12 +100,14 @@ def read_rjokes_data(file):
         list of lists - each inner list is a single joke tokenized
 '''
 def read_kjokes_data():
-    df = pd.read_csv(f"{DATA_DIR}/one-million-reddit-jokes.csv", nrows=1000)
-    df['all_text'] = df['title'] + ' ' + df['selftext']
+    df = pd.read_csv(f"{DATA_DIR}/one-million-reddit-jokes.csv", nrows=1500)  # Reduced for faster training
+    df['all_text'] = df['title'].astype(str) + ' ' + df['selftext'].astype(str)
 
     # Remove posts with redacted text ([removed], [deleted], etc)
-    df = df[~df['all_text'].str.contains("[removed]", regex=False)]
-    df = df[~df['all_text'].str.contains("[deleted]", regex=False)]
+    # Handle NaN values by filling them with empty string first
+    df = df[df['all_text'].notna()]  # Remove rows with NaN
+    df = df[~df['all_text'].str.contains("[removed]", regex=False, na=False)]
+    df = df[~df['all_text'].str.contains("[deleted]", regex=False, na=False)]
     text_list = df['all_text'].tolist()
     tokens = []
 
@@ -126,8 +130,8 @@ def read_kjokes_data():
     Returns
         Word2Vec word model
 '''
-def create_word_embeddings(tokens, save=True, fp="../models"):
-   model = Word2Vec(sentences=tokens, window=5, min_count=1, sg=1)
+def create_word_embeddings(tokens, save=True, fp="models"):
+   model = Word2Vec(sentences=tokens, window=5, min_count=3, sg=1)  # min_count=3 filters rare words
    model.wv.save_word2vec_format(f"{fp}/word_embeddings.txt", binary=False)
    return model
 
@@ -138,10 +142,26 @@ def create_word_embeddings(tokens, save=True, fp="../models"):
         A list of lists, each inner list is the a joke encoded as indices
         The tokenizer object that achieves this goal
 '''
-def encode_as_indices(tokens):
-    word_tokenizer = Tokenizer()
+def encode_as_indices(tokens, max_vocab_size=10000):
+    word_tokenizer = Tokenizer(oov_token="<UNK>")  # Don't set num_words here - it doesn't work
     word_tokenizer.fit_on_texts(tokens)
-    return (word_tokenizer.texts_to_sequences(tokens), word_tokenizer)
+    
+    # Actually limit the word_index to only top max_vocab_size words
+    # Keep only the most frequent words
+    sorted_words = sorted(word_tokenizer.word_counts.items(), key=lambda x: x[1], reverse=True)
+    limited_word_index = {}
+    limited_word_index['<UNK>'] = 1  # Reserve 1 for OOV
+    for idx, (word, count) in enumerate(sorted_words[:max_vocab_size-2], start=2):  # -2 for padding(0) and OOV(1)
+        limited_word_index[word] = idx
+    
+    # Update tokenizer with limited vocabulary
+    word_tokenizer.word_index = limited_word_index
+    word_tokenizer.num_words = max_vocab_size  # Set this explicitly
+    
+    # Generate sequences with limited vocabulary (unknown words become OOV)
+    sequences = word_tokenizer.texts_to_sequences(tokens)
+    
+    return (sequences, word_tokenizer)
 
 '''
     Takes the encoded data (list of lists) and 
@@ -199,7 +219,15 @@ def read_embeddings(filename: str, tokenizer: Tokenizer):
     embeddings = KeyedVectors.load_word2vec_format(filename, binary=False)
 
     word_to_embedding = {word: embeddings[word] for word in embeddings.key_to_index}
-    index_to_embedding = {index: embeddings[word] for word, index in tokenizer.word_index.items() if word in embeddings}
+    # Only include embeddings for words in the limited vocabulary (num_words)
+    num_words = getattr(tokenizer, 'num_words', None) or len(tokenizer.word_index) + 1
+    index_to_embedding = {}
+    for word, index in tokenizer.word_index.items():
+        if index < num_words and word in embeddings:
+            index_to_embedding[index] = embeddings[word]
+    # Also add embedding for index 0 (OOV/padding) if it exists
+    if 0 not in index_to_embedding and '<UNK>' in embeddings:
+        index_to_embedding[0] = embeddings['<UNK>']
 
     return (word_to_embedding, index_to_embedding)
 
@@ -264,7 +292,18 @@ def custom_data_generator(X: list, y: list, num_sequences_per_batch: int, index_
             X_batch = []
             for ngram in X_batch_raw:
                 # Get embeddings for each token index in the (n-1)-gram
-                embeddings = [index_2_embedding[idx] for idx in ngram]
+                # Handle missing indices (words not in vocabulary or without embeddings)
+                embeddings = []
+                for idx in ngram:
+                    if idx in index_2_embedding:
+                        embeddings.append(index_2_embedding[idx])
+                    else:
+                        # Use zero vector if embedding not found (shouldn't happen often)
+                        if len(embeddings) > 0:
+                            embeddings.append(np.zeros_like(embeddings[0]))
+                        else:
+                            # If first embedding is missing, use a default size (100 dims)
+                            embeddings.append(np.zeros(100))
                 # Stack them to create (timesteps, embedding_dim)
                 X_batch.append(np.array(embeddings))
             
