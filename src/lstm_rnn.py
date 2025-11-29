@@ -11,13 +11,16 @@
 
 import warnings
 warnings.filterwarnings('ignore', category=RuntimeWarning)  # Suppress gensim NumPy warnings
-
+import argparse
+import os
+import time
 import numpy as np
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import Dense, LSTM, Dropout
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.callbacks import ReduceLROnPlateau
 import pickle
 from prepare_data import (
     read_kjokes_data, 
@@ -35,9 +38,9 @@ from prepare_data import (
 )
 
 # Training parameters
-EPOCHS = 3  # increased from 2 for better learning
+EPOCHS = 10  # increased from 2 for better learning
 LEARNING_RATE = 0.001  # turned fown for more stable training
-LSTM_UNITS = 64  # Reduced from 128 for faster training
+LSTM_UNITS = 128  # Reduced from 128 for faster training
 DROPOUT_RATE = 0.2
 
 def build_model(timesteps, embedding_dim, vocab_size, lstm_units=LSTM_UNITS, dropout_rate=DROPOUT_RATE):
@@ -66,7 +69,7 @@ def build_model(timesteps, embedding_dim, vocab_size, lstm_units=LSTM_UNITS, dro
     model.add(Dense(vocab_size, activation='softmax'))
     
     # Compile model
-    optimizer = Adam(learning_rate=LEARNING_RATE)
+    optimizer = Adam(learning_rate=LEARNING_RATE, clipnorm=1.0)
     model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
     
     return model
@@ -99,13 +102,21 @@ def train_model(model, data_gen, steps_per_epoch, epochs=EPOCHS):
         verbose=1,
         mode='min'
     )
+
+    reduce_lr = ReduceLROnPlateau(
+        monitor='loss',
+        factor=0.5,
+        patience=2,
+        min_lr=0.0001,
+        verbose=1
+    )
     
     # Train the model
     history = model.fit(
         data_gen,
         steps_per_epoch=steps_per_epoch,
         epochs=epochs,
-        callbacks=[checkpoint, early_stop],
+        callbacks=[checkpoint, early_stop, reduce_lr],
         verbose=1
     )
     
@@ -246,76 +257,117 @@ if __name__ == "__main__":
     print("=" * 50)
     print("Loading and preparing data...")
     print("=" * 50)
+
+    # Only retrain with
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--train', action='store_true', 
+                       help='Force retraining even if model exists')
+    args = parser.parse_args()
     
-    # Load data (limited for faster training)
-    kaggle_jokes = read_kjokes_data()
-    rJokes_scores, rJokes = read_rjokes_data("train.tsv", max_jokes=2000)  # Limit to 2000 jokes
-    all_jokes = kaggle_jokes + rJokes
-    
-    # Create embeddings
-    word_embeddings = create_word_embeddings(all_jokes, save=True, fp=MODEL_DIR)
-    
-    # Encode words (limit to 10000 most frequent words)
-    encoded_words, word_tokenizer = encode_as_indices(all_jokes, max_vocab_size=10000)
-    # Ensure vocab_size matches the limited vocabulary
-    vocab_size = len(word_tokenizer.word_index) + 1  # +1 for padding token at index 0
-    print(f"\nVocabulary size: {vocab_size} (limited from full vocabulary)")
-    
-    # Generate training samples
-    training_samples = generate_ngram_training_samples(encoded_words, NGRAM)
-    training_samples_xy = isolate_labels(training_samples, NGRAM)
-    
-    print(f"Total training samples: {len(training_samples_xy[0])}")
-    
-    # Load embeddings
-    word_to_embedding, word_index_to_embedding = read_embeddings(
-        f"{MODEL_DIR}/word_embeddings.txt", 
-        word_tokenizer
-    )
-    
-    # Get embedding dimension
-    sample_embedding = list(word_index_to_embedding.values())[0]
-    embedding_dim = sample_embedding.shape[0]
-    timesteps = NGRAM - 1  # Number of context words
-    
-    print(f"Embedding dimension: {embedding_dim}")
-    print(f"Timesteps (context words): {timesteps}")
-    
-    # Create data generator
-    data_gen = custom_data_generator(
-        training_samples_xy[0], 
-        training_samples_xy[1], 
-        BATCH_SIZE, 
-        word_index_to_embedding, 
-        vocab_size
-    )
-    
-    # Calculate steps per epoch
-    steps_per_epoch = len(training_samples_xy[0]) // BATCH_SIZE
-    
-    print("\n" + "=" * 50)
-    print("Building model...")
-    print("=" * 50)
-    
-    # Build model
-    model = build_model(timesteps, embedding_dim, vocab_size)
-    model.summary()
-    
-    print("\n" + "=" * 50)
-    print("Training model...")
-    print("=" * 50)
-    
-    # Train model
-    history = train_model(model, data_gen, steps_per_epoch, epochs=EPOCHS)
-    
-    # Save final model (use .h5 for compatibility)
-    model.save(f"{MODEL_DIR}/final_model.h5")
-    print(f"\nModel saved to {MODEL_DIR}/final_model.keras")
-    
-    # Save tokenizer for later use
-    with open(f"{MODEL_DIR}/tokenizer.pkl", 'wb') as f:
-        pickle.dump(word_tokenizer, f)
-    print(f"Tokenizer saved to {MODEL_DIR}/tokenizer.pkl")
+    model_path = f"{MODEL_DIR}/final_model.h5"
+    if os.path.exists(model_path) and not args.train:
+
+        # Load existing model
+        model = load_model(model_path)
+
+        # Load in tokenizer
+        tokenizer_path = f"{MODEL_DIR}/tokenizer.pkl"
+        with open(tokenizer_path, 'rb') as f:
+            word_tokenizer = pickle.load(f)
+
+        # Load in word embeddings
+        word_to_embedding, word_index_to_embedding = read_embeddings(
+            f"{MODEL_DIR}/word_embeddings.txt", 
+            word_tokenizer
+        )
+        vocab_size = len(word_tokenizer.word_index) + 1
+
+        print("\n" + "=" * 50)
+        print("Loading in existing model...")
+        print("=" * 50)
+    else:
+        print("\n" + "=" * 50)
+        print("Training a new model...")
+        print("=" * 50)
+        
+        print("\n" + "=" * 50)
+        print("Building model...")
+        print("=" * 50)
+
+        # Load data (limited for faster training)
+        kaggle_jokes = read_kjokes_data()
+        rJokes_scores, rJokes = read_rjokes_data("train.tsv", max_jokes=200000)  # Limit number of jokes
+        all_jokes = kaggle_jokes + rJokes
+
+         # Create embeddings
+        word_embeddings = create_word_embeddings(all_jokes, save=True, fp=MODEL_DIR)
+        
+        # Encode words (limit to 10000 most frequent words)
+        encoded_words, word_tokenizer = encode_as_indices(all_jokes, max_vocab_size=10000)
+        # Ensure vocab_size matches the limited vocabulary
+        vocab_size = len(word_tokenizer.word_index) + 1  # +1 for padding token at index 0
+        print(f"\nVocabulary size: {vocab_size} (limited from full vocabulary)")
+        
+        # Generate training samples
+        training_samples = generate_ngram_training_samples(encoded_words, NGRAM)
+        training_samples_xy = isolate_labels(training_samples, NGRAM)
+        
+        print(f"Total training samples: {len(training_samples_xy[0])}")
+        
+        # Load embeddings
+        word_to_embedding, word_index_to_embedding = read_embeddings(
+            f"{MODEL_DIR}/word_embeddings.txt", 
+            word_tokenizer
+        )
+        
+        # Get embedding dimension
+        sample_embedding = list(word_index_to_embedding.values())[0]
+        embedding_dim = sample_embedding.shape[0]
+        timesteps = NGRAM - 1  # Number of context words
+        
+        print(f"Embedding dimension: {embedding_dim}")
+        print(f"Timesteps (context words): {timesteps}")
+        
+        # Create data generator
+        data_gen = custom_data_generator(
+            training_samples_xy[0], 
+            training_samples_xy[1], 
+            BATCH_SIZE, 
+            word_index_to_embedding, 
+            vocab_size
+        )
+        
+        # Calculate steps per epoch
+        steps_per_epoch = len(training_samples_xy[0]) // BATCH_SIZE
+        
+        # Build model
+        model = build_model(timesteps, embedding_dim, vocab_size)
+        model.summary()
+        
+        print("\n" + "=" * 50)
+        print("Training model...")
+        print("=" * 50)
+        
+        # Train model
+        start = time.time()
+        history = train_model(model, data_gen, steps_per_epoch, epochs=EPOCHS)
+        end = time.time()
+        elapsed = end - start
+        minutes = int(elapsed // 60)
+        seconds = elapsed % 60
+
+        print("\n" + "=" * 50)
+        print(f"Training complete! Training took {minutes}m {seconds}s")
+        print("=" * 50)
+        
+        # Save final model (use .h5 for compatibility)
+        model.save(f"{MODEL_DIR}/final_model.h5")
+        print(f"\nModel saved to {MODEL_DIR}/final_model.h5")
+        
+        # Save tokenizer for later use
+        with open(f"{MODEL_DIR}/tokenizer.pkl", 'wb') as f:
+            pickle.dump(word_tokenizer, f)
+        print(f"Tokenizer saved to {MODEL_DIR}/tokenizer.pkl")
     
     print("\n" + "=" * 50)
     print("Generating sample text...")
@@ -324,7 +376,8 @@ if __name__ == "__main__":
     # Test text generation WITH different temperatures
     seed_texts = ["why did the", "a man walks into", "what do you call"]
     
-    print("\nGenerating with temperature=0.7 (more focused):")
+    temperature = 0.7
+    print(f"\nGenerating with temperature={temperature} (more focused):")
     for seed in seed_texts:
         generated = generate_text(
             model, 
@@ -333,13 +386,15 @@ if __name__ == "__main__":
             seed,
             vocab_size,
             num_words=25,
-            temperature=0.7
+            temperature=temperature
         )
         print(f"\nSeed: '{seed}'")
         print(f"Generated: {generated}")
     
     print("\n" + "-" * 50)
-    print("Generating with temperature=1.0 (balanced):")
+
+    temperature = 1.2
+    print(f"Generating with temperature={temperature}(balanced):")
     for seed in seed_texts:
         generated = generate_text(
             model, 
@@ -348,11 +403,29 @@ if __name__ == "__main__":
             seed,
             vocab_size,
             num_words=25,
-            temperature=1.0
+            temperature=temperature
         )
         print(f"\nSeed: '{seed}'")
         print(f"Generated: {generated}")
     
     print("\n" + "=" * 50)
-    print("Training complete!")
+
+    temperature = 2.0
+    print(f"Generating with temperature={temperature}(spicy):")
+    for seed in seed_texts:
+        generated = generate_text(
+            model, 
+            word_tokenizer, 
+            word_index_to_embedding, 
+            seed,
+            vocab_size,
+            num_words=25,
+            temperature=temperature
+        )
+        print(f"\nSeed: '{seed}'")
+        print(f"Generated: {generated}")
+    print("\n" + "=" * 50)
+    
+    print("\n" + "=" * 50)
+    print("Text Generation complete!")
     print("=" * 50)
