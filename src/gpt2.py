@@ -82,8 +82,7 @@ class JokeDataset(Dataset):
         
         # Create labels: copy input_ids but set padding positions to -100 (ignored in loss)
         labels = input_ids.clone()
-        labels[attention_mask == 0] = -100  # Mask padding tokens from loss calculation
-        
+        labels[attention_mask == 0] = -100  # Mask padding tokens from loss calculation    
         return {
             'input_ids': input_ids,
             'attention_mask': attention_mask,
