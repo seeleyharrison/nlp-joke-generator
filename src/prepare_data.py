@@ -23,7 +23,7 @@ import numpy as np
 nltk.download('punkt')
 
 DATA_DIR = "data"  # Changed from "../../data" since script runs from project root
-MODEL_DIR = "models"  # Changed from "../models" since script runs from project root
+MODEL_DIR = "finalModel2"  # Changed from "../models" since script runs from project root
 SENTENCE_BEGIN = "<s>"
 SENTENCE_END = "</s>"
 NGRAM = 5  # 3->5 for better context window

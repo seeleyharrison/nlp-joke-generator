@@ -312,8 +312,9 @@ def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top
     return generated_jokes
 
 if __name__ == "__main__":
+    print()
     print("=" * 70)
-    print("GPT-2 Joke Generator - Transfer Learning (Optimized)")
+    print("The Joke Generator")
     print("=" * 70)
     
     # parse arguments for running script
@@ -324,27 +325,30 @@ if __name__ == "__main__":
                        help='Custom prompt for generation')
     parser.add_argument('--grid-search', action='store_true',
                        help='Run grid search for learning rate before training')
+    parser.add_argument('--app', action='store_true',
+                       help='Terminal application')
     args = parser.parse_args()
     
     # Create models directory if it doesn't exist in the gpu repo area e.g. models/
     os.makedirs(MODEL_DIR, exist_ok=True)
     
-    model_path = f"{MODEL_DIR}/gpt2-jokes-v2"
+    model_path = f"{MODEL_DIR}/gpt2-jokes"
     
     # Check if model exists gpu
-    if os.path.exists(model_path) and not args.train:
-        print("\n" + "=" * 70)
-        print("Loading existing fine-tuned model...")
-        print("=" * 70)
+    if os.path.exists(MODEL_DIR) and not args.train:
+        # print()
+        # print("\n" + "=" * 70)
+        # print("Loading existing fine-tuned model...")
+        # print("=" * 70)
+        # print()
         
-        tokenizer = GPT2Tokenizer.from_pretrained(model_path)
-        model = GPT2LMHeadModel.from_pretrained(model_path)
+        tokenizer = GPT2Tokenizer.from_pretrained(MODEL_DIR)
+        model = GPT2LMHeadModel.from_pretrained(MODEL_DIR)
         
         # Set device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model = model.to(device)
-        print(f"Model loaded on device: {device}")
-        
+        # print(f"Model loaded on device: {device}")        
     else:
         print("\n" + "=" * 70)
         print("Training new model with transfer learning...")
@@ -406,6 +410,21 @@ if __name__ == "__main__":
         trainer.save_model(model_path)
         tokenizer.save_pretrained(model_path)
         print(f"Model saved to {model_path}")
+
+
+    # Terminal Program
+    if args.app:
+        while True:
+            print("\n" + "=" * 70)
+            prompt = input("Enter a prompt for a new joke!\n\n")
+            temperature = float(input("\nEnter a temperature for your joke: "))
+            generation = generate_joke(model, tokenizer, prompt, max_length=80, temperature=temperature, num_return_sequences=1)[0]
+            print()
+            print((prompt + " " + generation.strip()))
+            cont = int(input("\nEnter 1 to continue or 2 to exit: "))
+            print("" + "=" * 70)
+            if cont == 2:
+                exit(0)
     
     # Generate sample jokes
     print("\n" + "=" * 70)
