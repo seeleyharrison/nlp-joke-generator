@@ -77,11 +77,17 @@ class JokeDataset(Dataset):
             return_tensors='pt'
         )
         
-        # Return as dict with both input_ids and labels
+        input_ids = encodings['input_ids'].squeeze()
+        attention_mask = encodings['attention_mask'].squeeze()
+        
+        # Create labels: copy input_ids but set padding positions to -100 (ignored in loss)
+        labels = input_ids.clone()
+        labels[attention_mask == 0] = -100  # Mask padding tokens from loss calculation
+        
         return {
-            'input_ids': encodings['input_ids'].squeeze(),
-            'attention_mask': encodings['attention_mask'].squeeze(),
-            'labels': encodings['input_ids'].squeeze()
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
+            'labels': labels
         }
 
 def prepare_joke_data():
@@ -157,7 +163,7 @@ def fine_tune_model(model, tokenizer, train_dataset, eval_dataset, output_dir):
         save_total_limit=3,
         # Evaluation for overfitting detection
         eval_strategy="steps",
-        eval_steps=250,
+        eval_steps=250, 
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,

@@ -12,6 +12,8 @@ def calculate_perplexity(model, tokenizer, jokes, device):
     results = []
     
     for joke in jokes:
+        # KEY: No padding here! If you do padding='max_length', padding tokens get
+        # included in loss calculation -> loss explodes -> PPL = 400,000
         inputs = tokenizer(joke + tokenizer.eos_token, return_tensors="pt").to(device)
         
         with torch.no_grad():
