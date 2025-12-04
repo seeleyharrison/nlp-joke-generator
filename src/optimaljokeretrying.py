@@ -1,12 +1,26 @@
-'''
-Generate jokes from the fine-tuned GPT-2 model.
-Usage: python src/generate_jokes.py
-'''
-
 import torch
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 import re
 import random
+
+'''
+    This file generates a bunch of jokes from the fine-tuned GPT-2 model.
+    This is what we used to generate our list of 100 jokes used in human evaluation.
+
+    Make sure your python environment for this repo is activated!
+
+    To run this file, run this command from the repo root: 
+        
+        python src/generate_jokes.py
+
+    In this file, we perform a lot or post processing on the outputs from the model,
+    This includes getting rid of offensive generations, malformed output, and such.
+    In hindsight, we wish we could have done more of this work in the data preprocessing stage,
+    and therefore our model would have never even seen some of this bad data. We originally didn't do this
+    because we wanted to keep the NSFW aspect of reddit still apparent in our model. However, if we had
+    more time/compute power, we would choose to do more data preprocessing to limit training on 
+    bad data.
+'''
 
 # Config
 MODEL_PATH = "models/gpt2-jokes-v5"
@@ -59,7 +73,7 @@ EXPLICIT_WORDS = [
     'murder', 'killing', 'suicide', 'suicidal',
 ]
 
-# Reddit garbage that triggers regeneration
+# Reddit garbage that we want to limit
 REDDIT_GARBAGE = [
     'edit:', 'edit!', 'edit 2', 'edit 3', '*edit',
     'thanks for the gold', 'thanks for the silver', 'thanks for the award',

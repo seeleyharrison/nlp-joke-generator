@@ -1,3 +1,12 @@
+from gensim.models import Word2Vec
+import pandas as pd
+import re
+import nltk
+from tensorflow.keras.preprocessing.text import Tokenizer
+from gensim.models import KeyedVectors
+from tensorflow.keras.utils import to_categorical
+import numpy as np
+nltk.download('punkt')
 
 '''
     This file prepares/processes our joke data into inputs for our
@@ -10,24 +19,16 @@
     5) Generates training samples and splits into x and y
     6) Creates a data generator for efficiency
     7) Map word embeddings to tokens and their index
+
+    This is essentially our helpers.py file
 '''
 
-from gensim.models import Word2Vec
-import pandas as pd
-import re
-import nltk
-from tensorflow.keras.preprocessing.text import Tokenizer
-from gensim.models import KeyedVectors
-from tensorflow.keras.utils import to_categorical
-import numpy as np
-nltk.download('punkt')
-
-DATA_DIR = "data"  # Changed from "../../data" since script runs from project root
-MODEL_DIR = "finalModel2"  # Changed from "../models" since script runs from project root
+DATA_DIR = "data"
+MODEL_DIR = "finalModel2"
 SENTENCE_BEGIN = "<s>"
 SENTENCE_END = "</s>"
-NGRAM = 5  # 3->5 for better context window
-BATCH_SIZE = 32  # 3->32 for more stable training
+NGRAM = 5 
+BATCH_SIZE = 32
 
 '''
     Tokenize a single string. Glue on the appropriate number of 
@@ -56,14 +57,13 @@ def tokenize_line(line: str, ngram: int,
     line = line.replace(' ', space_char)
     inner_pieces = list(line)
   else:
-    # otherwise use nltk's word tokenizer
     inner_pieces = nltk.word_tokenize(line)
 
   if ngram == 1:
     tokens = [sentence_begin] + inner_pieces + [sentence_end]
   else:
     tokens = ([sentence_begin] * (ngram - 1)) + inner_pieces + ([sentence_end] * (ngram - 1))
-  # always count the unigrams
+
   return tokens
 
 '''
@@ -76,9 +76,6 @@ def tokenize_line(line: str, ngram: int,
         list of lists - each inner list is a single joke tokenized
 '''
 def read_rjokes_data(file, max_jokes=2000):
-    '''
-    Reads in jokes from rJokes dataset, limiting to max_jokes for faster training
-    '''
     with open(f"{DATA_DIR}/{file}", 'r', encoding='utf-8') as f:  # Add encoding='utf-8'
         joke_lines = f.readlines()[:max_jokes]  # Limit number of jokes loaded
 
@@ -143,20 +140,20 @@ def create_word_embeddings(tokens, save=True, fp="models"):
         The tokenizer object that achieves this goal
 '''
 def encode_as_indices(tokens, max_vocab_size=10000):
-    word_tokenizer = Tokenizer(oov_token="<UNK>")  # Don't set num_words here - it doesn't work
+    word_tokenizer = Tokenizer(oov_token="<UNK>")
     word_tokenizer.fit_on_texts(tokens)
     
     # Actually limit the word_index to only top max_vocab_size words
     # Keep only the most frequent words
     sorted_words = sorted(word_tokenizer.word_counts.items(), key=lambda x: x[1], reverse=True)
     limited_word_index = {}
-    limited_word_index['<UNK>'] = 1  # Reserve 1 for OOV
-    for idx, (word, count) in enumerate(sorted_words[:max_vocab_size-2], start=2):  # -2 for padding(0) and OOV(1)
+    limited_word_index['<UNK>'] = 1
+    for idx, (word, count) in enumerate(sorted_words[:max_vocab_size-2], start=2):
         limited_word_index[word] = idx
     
     # Update tokenizer with limited vocabulary
     word_tokenizer.word_index = limited_word_index
-    word_tokenizer.num_words = max_vocab_size  # Set this explicitly
+    word_tokenizer.num_words = max_vocab_size
     
     # Generate sequences with limited vocabulary (unknown words become OOV)
     sequences = word_tokenizer.texts_to_sequences(tokens)
@@ -219,13 +216,11 @@ def read_embeddings(filename: str, tokenizer: Tokenizer):
     embeddings = KeyedVectors.load_word2vec_format(filename, binary=False)
 
     word_to_embedding = {word: embeddings[word] for word in embeddings.key_to_index}
-    # Only include embeddings for words in the limited vocabulary (num_words)
     num_words = getattr(tokenizer, 'num_words', None) or len(tokenizer.word_index) + 1
     index_to_embedding = {}
     for word, index in tokenizer.word_index.items():
         if index < num_words and word in embeddings:
             index_to_embedding[index] = embeddings[word]
-    # Also add embedding for index 0 (OOV/padding) if it exists
     if 0 not in index_to_embedding and '<UNK>' in embeddings:
         index_to_embedding[0] = embeddings['<UNK>']
 
@@ -255,9 +250,7 @@ def data_generator(X: list, y: list, num_sequences_per_batch: int, index_2_embed
             # Convert token indices to flattened embedding vectors
             X_batch = []
             for ngram in X_batch_raw:
-                # Get embeddings for each token index in the (n-1)-gram
                 embeddings = [index_2_embedding[idx] for idx in ngram]
-                # Flatten them into a single vector
                 flat_vector = np.concatenate(embeddings)
                 X_batch.append(flat_vector)
             
@@ -291,54 +284,19 @@ def custom_data_generator(X: list, y: list, num_sequences_per_batch: int, index_
             # Convert token indices to 3D embedding tensor
             X_batch = []
             for ngram in X_batch_raw:
-                # Get embeddings for each token index in the (n-1)-gram
-                # Handle missing indices (words not in vocabulary or without embeddings)
                 embeddings = []
                 for idx in ngram:
                     if idx in index_2_embedding:
                         embeddings.append(index_2_embedding[idx])
                     else:
-                        # Use zero vector if embedding not found (shouldn't happen often)
                         if len(embeddings) > 0:
                             embeddings.append(np.zeros_like(embeddings[0]))
                         else:
-                            # If first embedding is missing, use a default size (100 dims)
                             embeddings.append(np.zeros(100))
-                # Stack them to create (timesteps, embedding_dim)
                 X_batch.append(np.array(embeddings))
             
-            X_batch = np.array(X_batch)  # Shape: (batch_size, timesteps, embedding_dim)
+            X_batch = np.array(X_batch)
             y_batch_categorical = to_categorical(y_batch, num_classes=vocab_size)
 
             yield X_batch, y_batch_categorical
-
-if __name__ == "__main__":
-    kaggle_jokes = read_kjokes_data()
-    rJokes_scores, rJokes = read_rjokes_data("lightweight.tsv")
-    all_jokes = kaggle_jokes + rJokes
-    word_embeddings = create_word_embeddings(all_jokes)
-
-    print("Word Embedding for 'girlfriend' is: ")
-    print(word_embeddings.wv["girlfriend"])
-
-    encoded_words, word_tokenizer = encode_as_indices(all_jokes)
-    vocab_size = len(word_tokenizer.word_index) + 1
-    print(f"Number of words we have in our corpus: {vocab_size}")
-
-    training_samples = generate_ngram_training_samples(encoded_words, NGRAM)
-    print("First 5 training samples")
-    print(training_samples[0:5])
-
-    training_samples_xy = isolate_labels(training_samples, NGRAM)
-    print("First 5 training samples x")
-    print(training_samples[0][0:3])
-    print("First 5 training samples y")
-    print(training_samples[1][0:3])
-
-    word_to_embedding, word_index_to_embedding = read_embeddings(f"{MODEL_DIR}/word_embeddings.txt", word_tokenizer)
-    print(f"Word embedding of 'girlfriend': {word_to_embedding['must']}")
-    print(f"Word embedding of word index 1: {word_index_to_embedding[1]}")
-
-    word_data_generator = data_generator(training_samples_xy[0], training_samples_xy[1], BATCH_SIZE, word_index_to_embedding, vocab_size)
-    print(f"First batch of training samples: {next(word_data_generator)}")
         

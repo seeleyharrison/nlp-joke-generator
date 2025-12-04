@@ -16,6 +16,9 @@ This script:
   5. Generates jokes with temperature sampling
 
 This is a simple toy example to scale up later with more of the data, also to figure out RNN hyperparameters.
+This was our first attempt at the RNN, and is not runable. Our final version of our LSTM RNN can be
+seen/run in the lstm_rnn.py file. Long story short, this is just here to show you our initial steps
+despite this code not actually ever being used.
 """
 
 import os
@@ -139,8 +142,6 @@ def generate_joke(model, tokenizer, seed_text, length=30, temperature=0.9):
         result.append(word)
 
     return " ".join(result)
-
-
 
 # Main execution
 if __name__ == "__main__":
