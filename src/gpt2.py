@@ -24,19 +24,23 @@ from transformers import (
     Trainer,
     DataCollatorForLanguageModeling
 )
-from prepare_data import (
-    read_kjokes_data, 
-    read_rjokes_data,
-    DATA_DIR,
-    MODEL_DIR
-)
-import numpy as np
+import pandas as pd
+import re
+import json
 
-EPOCHS = 10
-LEARNING_RATE = 3e-5 #found with grid search
-BATCH_SIZE = 16
+DATA_DIR = "compressed_data"
+MODEL_DIR = "models"
+
+# Minimum upvotes to include joke (quality filter)
+MIN_SCORE = 10  # Raised from 5 to filter out low-quality jokes
+MAX_JOKES = None  # None = all jokes, set to int to limit (e.g., 100000)
+
+
+EPOCHS = 3
+LEARNING_RATE = 5e-5  # Slightly increased for faster convergence
+BATCH_SIZE = 24
 MAX_LENGTH = 192  # Maximum sequence length for GPT-2 (longer jokes)
-GRADIENT_ACCUMULATION_STEPS = 2  # Effective batch size = 16 * 2 = 32
+GRADIENT_ACCUMULATION_STEPS = 3  # Effective batch size = 24 * 3 * 3 = 216
 
 # Data quality filtering so nothing is bad 
 MIN_JOKE_LENGTH = 20
@@ -65,62 +69,130 @@ class JokeDataset(Dataset):
     def __getitem__(self, idx):
         joke = self.jokes[idx]
         
-        # Only use eos_token (no bos  GPT2 doesn't need it, avoids random embeddings)
+        # Only use eos_token (no bos - GPT2 doesn't need it, avoids random embeddings)
         text = f"{joke}{self.tokenizer.eos_token}"
         
-        # Tokenize
+        # Debug print for first item to check data integrity
+        if idx == 0:
+            print(f"\nDEBUG: Sample Text (idx=0): '{text}'\n")
+        
+        # Tokenize (no padding here - DataCollator will batch-pad dynamically)
         encodings = self.tokenizer(
             text,
             truncation=True,
             max_length=self.max_length,
-            padding='max_length',
             return_tensors='pt'
         )
         
-        # Return as dict with both input_ids and labels
+        # Return only input_ids and attention_mask
+        # Let DataCollatorForLanguageModeling create labels (properly masks padding with -100)
         return {
             'input_ids': encodings['input_ids'].squeeze(),
-            'attention_mask': encodings['attention_mask'].squeeze(),
-            'labels': encodings['input_ids'].squeeze()
+            'attention_mask': encodings['attention_mask'].squeeze()
         }
 
 def prepare_joke_data():
-    '''
-    Load and prepare joke data from both sources
-    Returns:
-        List of joke strings (filtered by quality)
-    '''
+    '''Load jokes from CSV and TSV files with score filtering'''
     print("Loading joke data...")
+    jokes = []
     
-    #load kaggle jokes
-    kaggle_tokens = read_kjokes_data()
-    kaggle_jokes = []
-    for tokens in kaggle_tokens:
-        # Remove special tokens and reconstruct text not needed
-        joke = ' '.join([t for t in tokens if t not in ['<s>', '</s>', '_']])
-        joke = joke.replace(' _ ', ' ')  # Handle space character
-        kaggle_jokes.append(joke)
+    # Expanded NSFW filter (block slurs/spam)
+    nsfw_words = ['faggot', 'nigger', 'retard', 'rape', 'pedophile']
+    spam_patterns = ['http', 'https', '.com', 'subscribe', 'upvote']
     
-    # Load reddit jokes (more samples for better training) get tokens
-    _, rjokes_tokens = read_rjokes_data("train.tsv", max_jokes=100000)
-    rjokes = []
-    for tokens in rjokes_tokens:
-        joke = ' '.join([t for t in tokens if t not in ['<s>', '</s>', '_']])
-        joke = joke.replace(' _ ', ' ')
-        rjokes.append(joke)
+    def clean_text(text):
+        '''Standardize and clean text'''
+        text = str(text)
+        # Remove deleted/removed markers
+        if '[removed]' in text or '[deleted]' in text:
+            return None
+        # Clean HTML entities (including manual variations)
+        text = re.sub(r'&amp;|&#x200B;|#x200B;|&[a-zA-Z]+;', '', text)
+        # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text if text else None
+
+    # Load Kaggle CSV (title=setup, selftext=punchline)
+    csv_path = f"{DATA_DIR}/one-million-reddit-jokes.csv"
+    df = pd.read_csv(csv_path)
+    df = df[df['score'] >= MIN_SCORE]
     
-    all_jokes = kaggle_jokes + rjokes
-    print(f"Total jokes loaded (before filtering): {len(all_jokes)}")
+    # Combine title and selftext (vectorized for speed)
+    print("Processing CSV...")
+    df['joke'] = df['title'].fillna('').astype(str) + ' ' + df['selftext'].fillna('').astype(str)
+    df = df[~df['joke'].str.contains(r'\[removed\]|\[deleted\]', regex=True, na=False)]
     
-    # Filter jokes by length for quality (remove too short/long)
-    filtered_jokes = [j for j in all_jokes if MIN_JOKE_LENGTH <= len(j) <= MAX_JOKE_LENGTH]
-    print(f"Jokes after quality filtering ({MIN_JOKE_LENGTH}-{MAX_JOKE_LENGTH} chars): {len(filtered_jokes)}")
+    for text in df['joke']:
+        cleaned = clean_text(text)
+        if cleaned:
+            jokes.append(cleaned)
+            
+    print(f"Kaggle CSV: {len(jokes)} jokes (score >= {MIN_SCORE})")
     
-    # Minimal NSFW filter (very light to keep useful)
-    clean_jokes = [j for j in filtered_jokes if not any(w in j.lower() for w in ['fuck', 'bitch', 'dick', 'cock', 'pussy'])]
-    print(f"Jokes after minimal NSFW filter: {len(clean_jokes)} (removed {len(filtered_jokes) - len(clean_jokes)})")
+    # Load rJokes TSVs (train + dev + test)
+    tsv_count = 0
+    print("Processing TSVs...")
+    for tsv in ['rJokesData/train.tsv', 'rJokesData/dev.tsv', 'rJokesData/test.tsv']:
+        path = f"{DATA_DIR}/{tsv}"
+        if not os.path.exists(path): continue
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                parts = line.split('\t', 1)
+                if len(parts) == 2:
+                    try:
+                        # Ensure score is valid integer
+                        if int(parts[0]) >= MIN_SCORE:
+                            cleaned = clean_text(parts[1])
+                            if cleaned:
+                                jokes.append(cleaned)
+                                tsv_count += 1
+                    except: pass
+    print(f"rJokes TSV: {tsv_count} jokes (score >= {MIN_SCORE})")
+
+    # Load fullrjokes.json (additional data source)
+    json_path = f"{DATA_DIR}/rJokesData/fullrjokes.json"
+    json_count = 0
+    if os.path.exists(json_path):
+        print("Processing fullrjokes.json...")
+        with open(json_path, 'r') as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    if data.get('score', 0) >= MIN_SCORE:
+                        raw_joke = f"{data.get('title', '')} {data.get('selftext', '')}"
+                        cleaned = clean_text(raw_joke)
+                        if cleaned:
+                            jokes.append(cleaned)
+                            json_count += 1
+                except: pass
+        print(f"fullrjokes.json: {json_count} jokes (score >= {MIN_SCORE})")
     
-    return clean_jokes
+    # Length filter
+    jokes = [j for j in jokes if MIN_JOKE_LENGTH <= len(j) <= MAX_JOKE_LENGTH]
+    print(f"After length filter: {len(jokes)}")
+    
+    # Deduplication (preserves order)
+    before_dedup = len(jokes)
+    jokes = list(dict.fromkeys(jokes))
+    print(f"After deduplication: {len(jokes)} (removed {before_dedup - len(jokes)} duplicates)")
+    
+    def is_clean(joke):
+        lower = joke.lower()
+        if any(w in lower for w in nsfw_words):
+            return False
+        if any(p in lower for p in spam_patterns):
+            return False
+        return True
+    
+    clean = [j for j in jokes if is_clean(j)]
+    print(f"After NSFW/spam filter: {len(clean)} (removed {len(jokes) - len(clean)})")
+    
+    # Apply max limit if set
+    if MAX_JOKES and len(clean) > MAX_JOKES:
+        clean = clean[:MAX_JOKES]
+        print(f"Limited to MAX_JOKES: {MAX_JOKES}")
+    
+    return clean
 
 def fine_tune_model(model, tokenizer, train_dataset, eval_dataset, output_dir):
     '''
@@ -145,9 +217,9 @@ def fine_tune_model(model, tokenizer, train_dataset, eval_dataset, output_dir):
         weight_decay=0.02,  
         # Optimized scheduler settings learned cosine in class
         lr_scheduler_type="cosine",
-        warmup_ratio=0.06,  # Faster warmup
+        warmup_ratio=0.10,  # Better warmup for convergence
 
-        label_smoothing_factor=0.05,  # Reduced for clearer loss signal. (before training loss was way worse than eval loss)
+        label_smoothing_factor=0.02,  # Low for clearer loss signal
         max_grad_norm=1.0,  # Gradient clipping for stability
         # Logging and saving TODO: probably increase the steps because we dont needa do that many saves 
         # NOTE: must be equal savesteps and eval steps when running because of cuda
@@ -257,7 +329,8 @@ def grid_search_lr(model_class, tokenizer, train_dataset, eval_dataset, output_d
     print(f"\nBest LR: {best_lr} (loss: {best_loss:.4f})")
     return best_lr
 
-def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top_k=50, top_p=0.95, num_return_sequences=1, repetition_penalty=1.2):
+
+def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top_k=50, top_p=0.95, num_return_sequences=1, repetition_penalty=1.2, use_beam_search=True):
     '''
     Generate jokes using the fine-tuned model
     Args:
@@ -270,6 +343,7 @@ def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top
         top_p: Nucleus sampling parameter
         num_return_sequences: Number of jokes to generate
         repetition_penalty: Penalty for repeating tokens (>1.0 = less repetition)
+        use_beam_search: If True, use beam search for more coherent outputs
     Returns:
         List of generated jokes
     model.eval()
@@ -283,22 +357,38 @@ def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top
     input_ids = inputs['input_ids'].to(device)
     attention_mask = inputs['attention_mask'].to(device)
     
-    # Generate with improved coherence settings
+    # Generate with beam search for coherent punchlines, or sampling for variety
     with torch.no_grad():
-        output = model.generate(
-            input_ids,
-            attention_mask=attention_mask,  # Add this line
-            max_length=max_length,
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            num_return_sequences=num_return_sequences,
-            do_sample=True,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            repetition_penalty=repetition_penalty,
-            no_repeat_ngram_size=3,
-        )
+        if use_beam_search:
+            # Beam search: explores multiple paths for logical outputs
+            # Note: temperature is NOT used with beam search
+            output = model.generate(
+                input_ids,
+                max_length=max_length,
+                num_beams=4,
+                num_return_sequences=num_return_sequences,
+                do_sample=False,
+                early_stopping=True,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                repetition_penalty=repetition_penalty,
+                no_repeat_ngram_size=2,
+            )
+        else:
+            # Sampling: more variety but potentially less coherent
+            output = model.generate(
+                input_ids,
+                max_length=max_length,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                num_return_sequences=num_return_sequences,
+                do_sample=True,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                repetition_penalty=repetition_penalty,
+                no_repeat_ngram_size=2,
+            )
     
     # Decode outputs
     generated_jokes = []
@@ -331,7 +421,7 @@ if __name__ == "__main__":
     # Create models directory if it doesn't exist in the gpu repo area e.g. models/
     os.makedirs(MODEL_DIR, exist_ok=True)
     
-    model_path = f"{MODEL_DIR}/gpt2-jokes"
+    model_path = f"{MODEL_DIR}/gpt2-jokes-v3"
     
     # Check if model exists gpu
     if os.path.exists(MODEL_DIR) and not args.train:
@@ -368,6 +458,17 @@ if __name__ == "__main__":
         model.config.resid_pdrop = 0.15
         print(f"Dropout set: attn={model.config.attn_pdrop}, resid={model.config.resid_pdrop}")
         
+        # Freeze first 6 of 12 transformer layers (transfer learning optimization)
+        # This preserves general language knowledge while training top layers for jokes
+        frozen_layers = 0
+        for i, layer in enumerate(model.transformer.h):
+            if i < frozen_layers:
+                for param in layer.parameters():
+                    param.requires_grad = False
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
+        print(f"Layer freezing: {frozen_layers}/12 layers frozen, {trainable:,}/{total:,} params trainable")
+        
         # Set device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model = model.to(device)
@@ -398,6 +499,11 @@ if __name__ == "__main__":
             tokenizer.pad_token = tokenizer.eos_token
             model.config.attn_pdrop = 0.15
             model.config.resid_pdrop = 0.15
+            # Re-freeze layers after reload
+            for i, layer in enumerate(model.transformer.h):
+                if i < frozen_layers:
+                    for param in layer.parameters():
+                        param.requires_grad = False
             model = model.to(device)
         
         # Fine-tune with validation
@@ -442,11 +548,29 @@ if __name__ == "__main__":
             "My wife told me"
         ]
     
+    # Test with beam search (coherent)
+    print(f"\n{'=' * 70}")
+    print("Mode: Beam Search (coherent)")
+    print('=' * 70)
+    
+    for prompt in prompts:
+        jokes = generate_joke(
+            model, 
+            tokenizer, 
+            prompt,
+            max_length=80,
+            num_return_sequences=1,
+            use_beam_search=True
+        )
+        print(f"\nPrompt: '{prompt}'")
+        for joke in jokes:
+            print(f"Generated: {joke}")
+    
+    # Test with sampling at different temperatures (variety)
     temperatures = [0.7, 1.0, 1.3]
-    #TEST TEMPERATURES
     for temp in temperatures:
         print(f"\n{'=' * 70}")
-        print(f"Temperature: {temp}")
+        print(f"Mode: Sampling (temperature={temp})")
         print('=' * 70)
         
         for prompt in prompts:
@@ -456,11 +580,12 @@ if __name__ == "__main__":
                 prompt,
                 max_length=80,
                 temperature=temp,
-                num_return_sequences=1
+                num_return_sequences=1,
+                use_beam_search=False  # Use sampling with temperature
             )
             
             print(f"\nPrompt: '{prompt}'")
-            for i, joke in enumerate(jokes, 1):
+            for joke in jokes:
                 print(f"Generated: {joke}")
     
     print("\n" + "=" * 70)
