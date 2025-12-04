@@ -31,7 +31,7 @@ def calculate_perplexity(model, tokenizer, jokes, device):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, default='../finalModel2')
+    parser.add_argument('--model', type=str, default='../model3')
     parser.add_argument('--jokes', type=str, nargs='+', default=None)
     args = parser.parse_args()
     

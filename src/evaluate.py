@@ -35,8 +35,7 @@ def calculate_perplexity(model, dataloader, device):
         for batch in tqdm(dataloader, desc="Evaluating"):
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
-            
+            labels = batch['labels'].to(device)            
             outputs = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
