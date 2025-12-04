@@ -257,7 +257,6 @@ def grid_search_lr(model_class, tokenizer, train_dataset, eval_dataset, output_d
     print(f"\nBest LR: {best_lr} (loss: {best_loss:.4f})")
     return best_lr
 
-
 def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top_k=50, top_p=0.95, num_return_sequences=1, repetition_penalty=1.2):
     '''
     Generate jokes using the fine-tuned model
@@ -273,20 +272,22 @@ def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top
         repetition_penalty: Penalty for repeating tokens (>1.0 = less repetition)
     Returns:
         List of generated jokes
-    '''
     model.eval()
+    '''
     
-    # Encode prompt directly (no bos_token needed)
-    input_ids = tokenizer.encode(prompt, return_tensors='pt')
+    # Encode prompt WITH attention mask
+    inputs = tokenizer(prompt, return_tensors='pt')
     
     # Move to same device as model
     device = next(model.parameters()).device
-    input_ids = input_ids.to(device)
+    input_ids = inputs['input_ids'].to(device)
+    attention_mask = inputs['attention_mask'].to(device)
     
     # Generate with improved coherence settings
     with torch.no_grad():
         output = model.generate(
             input_ids,
+            attention_mask=attention_mask,  # Add this line
             max_length=max_length,
             temperature=temperature,
             top_k=top_k,
@@ -295,16 +296,14 @@ def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top
             do_sample=True,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
-            # Coherence improvements
             repetition_penalty=repetition_penalty,
-            no_repeat_ngram_size=3,  # Prevent 3-gram repetition e.g. the dog dog dog ran
+            no_repeat_ngram_size=3,
         )
     
     # Decode outputs
     generated_jokes = []
     for sequence in output:
         text = tokenizer.decode(sequence, skip_special_tokens=True)
-        # Remove the prompt from the output
         if prompt in text:
             text = text.replace(prompt, '').strip()
         generated_jokes.append(text)
@@ -344,6 +343,7 @@ if __name__ == "__main__":
         
         tokenizer = GPT2Tokenizer.from_pretrained(MODEL_DIR)
         model = GPT2LMHeadModel.from_pretrained(MODEL_DIR)
+        tokenizer.pad_token = tokenizer.eos_token
         
         # Set device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -418,7 +418,7 @@ if __name__ == "__main__":
             print("\n" + "=" * 70)
             prompt = input("Enter a prompt for a new joke!\n\n")
             temperature = float(input("\nEnter a temperature for your joke: "))
-            generation = generate_joke(model, tokenizer, prompt, max_length=80, temperature=temperature, num_return_sequences=1)[0]
+            generation = generate_joke(model, tokenizer, prompt, max_length=30, temperature=temperature, num_return_sequences=1)[0]
             print()
             print((prompt + " " + generation.strip()))
             cont = int(input("\nEnter 1 to continue or 2 to exit: "))
