@@ -62,7 +62,7 @@ EXPLICIT_WORDS = [
     'anal', 'anus', 'asshole', 'butthole',
     'penis', 'vagina', 'clitoris', 'clit', 'pussy', 'cock', 'dick',
     'titties', 'tits', 'boobs', 'breasts', 'nipple',
-    'cum', 'semen', 'sperm', 'ejaculat',
+    'cum', 'semen', 'sperm', 'ejaculate',
     'erection', 'boner', 'horny', 'aroused',
     'fuck', 'fucking', 'fucked', 'fucker', 'motherfuck',
     'shit', 'shitting', 'bullshit',

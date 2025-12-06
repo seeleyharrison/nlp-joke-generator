@@ -45,7 +45,20 @@ from prepare_data import (
     (this could take hours), you can alternatively perform evaluation and text generation
     on our best model.
 
-    Instructions on how to run this model can be seen in the main function below!
+    RUN INSTRUCTIONS
+    Note: If you haven't already, create/activate a new python virtual environment at the
+    root of this repository.
+
+    OPTION 1: Build and train a new model
+    1) From the repository root, run the command:
+        python src/lstm_rnn.py --train
+
+    OPTION 2: Use an existing model
+    1) From the repository root, run the command:
+        python src/lstm_rnn.py
+
+    After the model was built and trained or loaded from a file, the script will perform
+    perplexity and loss evaluation and then print out three samples of jokes!
 '''
 
 # Don't change!
@@ -294,21 +307,6 @@ def evaluate_model_perplexity(model, data_gen, steps):
 
 '''
     Main program/entry point to run evaluation and text generation on our model
-
-    RUN INSTRUCTIONS
-    Note: If you haven't already, create/activate a new python virtual environment at the
-    root of this repository.
-
-    OPTION 1: Build and train a new model
-    1) From the repository root, run the command:
-        python src/lstm_rnn.py --train
-
-    OPTION 2: Use an existing model
-    1) From the repository root, run the command:
-        python src/lstm_rnn.py
-
-    After the model was built and trained or loaded from a file, the script will perform
-    perplexity and loss evaluation and then print out three samples of jokes!
 '''
 if __name__ == "__main__":
 

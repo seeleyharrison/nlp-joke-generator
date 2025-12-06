@@ -1,12 +1,17 @@
 '''
-    This file fine-tunes GPT-2 for joke generation using transfer learning.
+    This file trains and fine-tunes GPT-2 for joke generation using transfer learning.
     It handles the following steps:
 
     1) Load the preprocessed joke data
+        - Includes the step of filtering out reddit posts with small upvote counts,
+        this helps filter out sloppy data
     2) Prepare data in the format expected by GPT-2
     3) Fine-tune GPT-2 on the joke corpus
     4) Save the fine-tuned model
-    5) Provide text generation functionality
+    5) Evaluate performance of fine-tuned model
+    6) Provide text generation functionality (through a terminal app or direct prompts)
+
+    RUN INSTRUCTIONS
 '''
 
 import warnings
@@ -27,15 +32,15 @@ from transformers import (
 import pandas as pd
 import re
 import json
+from sklearn.metrics import accuracy_score
+import math
+import numpy as np
 
 DATA_DIR = "compressed_data"
-MODEL_DIR = "models"
+MODEL_DIR = "model3"
 
-# Minimum upvotes to include joke (quality filter)
-MIN_SCORE = 10  # Raised from 5 to filter out low-quality jokes
-MAX_JOKES = None  # None = all jokes, set to int to limit (e.g., 100000)
-
-
+MIN_SCORE = 10  # Filters out low quality jokes, a joke must have a score greater than 10 to be included
+MAX_JOKES = None 
 EPOCHS = 3
 LEARNING_RATE = 5e-5  # Slightly increased for faster convergence
 BATCH_SIZE = 24
@@ -46,9 +51,8 @@ GRADIENT_ACCUMULATION_STEPS = 3  # Effective batch size = 24 * 3 * 3 = 216
 MIN_JOKE_LENGTH = 20
 MAX_JOKE_LENGTH = 400
 
-
-
-# Make sure pytorch and cuda works
+# Make sure pytorch and cuda works, some of us had nvidia gpus
+# so this was helpful for us in terms of speeding up training time
 print(f"PyTorch version: {torch.__version__}")
 print(f"CUDA available: {torch.cuda.is_available()}")
 print(f"CUDA version (PyTorch): {torch.version.cuda}")
@@ -56,7 +60,11 @@ print(f"Number of GPUs: {torch.cuda.device_count()}")
 
 class JokeDataset(Dataset):
     '''
-    Custom Dataset for joke text that tokenizes on-the-fly
+    Custom Dataset for joke text that tokenizes on-the-fly, this is mainly used
+    because extending the Dataset class allows for seamless integration with
+    PyTorch's trainer class that is great for transfer learning training.
+
+    This is essentially a variant of our data loader
     '''
     def __init__(self, jokes, tokenizer, max_length=MAX_LENGTH):
         self.jokes = jokes
@@ -69,14 +77,14 @@ class JokeDataset(Dataset):
     def __getitem__(self, idx):
         joke = self.jokes[idx]
         
-        # Only use eos_token (no bos - GPT2 doesn't need it, avoids random embeddings)
+        # Add eos token to end of the joke for gpt2 compatibilty
         text = f"{joke}{self.tokenizer.eos_token}"
         
         # Debug print for first item to check data integrity
         if idx == 0:
             print(f"\nDEBUG: Sample Text (idx=0): '{text}'\n")
         
-        # Tokenize (no padding here - DataCollator will batch-pad dynamically)
+        # Tokenize
         encodings = self.tokenizer(
             text,
             truncation=True,
@@ -84,8 +92,6 @@ class JokeDataset(Dataset):
             return_tensors='pt'
         )
         
-        # Return only input_ids and attention_mask
-        # Let DataCollatorForLanguageModeling create labels (properly masks padding with -100)
         return {
             'input_ids': encodings['input_ids'].squeeze(),
             'attention_mask': encodings['attention_mask'].squeeze()
@@ -95,10 +101,6 @@ def prepare_joke_data():
     '''Load jokes from CSV and TSV files with score filtering'''
     print("Loading joke data...")
     jokes = []
-    
-    # Expanded NSFW filter (block slurs/spam)
-    nsfw_words = ['faggot', 'nigger', 'retard', 'rape', 'pedophile']
-    spam_patterns = ['http', 'https', '.com', 'subscribe', 'upvote']
     
     def clean_text(text):
         '''Standardize and clean text'''
@@ -132,7 +134,7 @@ def prepare_joke_data():
     # Load rJokes TSVs (train + dev + test)
     tsv_count = 0
     print("Processing TSVs...")
-    for tsv in ['rJokesData/train.tsv', 'rJokesData/dev.tsv', 'rJokesData/test.tsv']:
+    for tsv in ['rJokesData/train.tsv', 'rJokesData/dev.tsv']:
         path = f"{DATA_DIR}/{tsv}"
         if not os.path.exists(path): continue
         with open(path, 'r', encoding='utf-8') as f:
@@ -176,27 +178,16 @@ def prepare_joke_data():
     jokes = list(dict.fromkeys(jokes))
     print(f"After deduplication: {len(jokes)} (removed {before_dedup - len(jokes)} duplicates)")
     
-    def is_clean(joke):
-        lower = joke.lower()
-        if any(w in lower for w in nsfw_words):
-            return False
-        if any(p in lower for p in spam_patterns):
-            return False
-        return True
-    
-    clean = [j for j in jokes if is_clean(j)]
-    print(f"After NSFW/spam filter: {len(clean)} (removed {len(jokes) - len(clean)})")
-    
     # Apply max limit if set
-    if MAX_JOKES and len(clean) > MAX_JOKES:
-        clean = clean[:MAX_JOKES]
+    if MAX_JOKES and len(jokes) > MAX_JOKES:
+        jokes = jokes[:MAX_JOKES]
         print(f"Limited to MAX_JOKES: {MAX_JOKES}")
     
-    return clean
+    return jokes
 
 def fine_tune_model(model, tokenizer, train_dataset, eval_dataset, output_dir):
     '''
-    Fine-tune the GPT-2 model on joke data with validation
+        Fine-tune the GPT-2 model on joke data with validation
     '''
     # Data collator for language modeling
     data_collator = DataCollatorForLanguageModeling(
@@ -204,7 +195,6 @@ def fine_tune_model(model, tokenizer, train_dataset, eval_dataset, output_dir):
         mlm=False  # GPT-2 uses causal LM, not masked LM so i changed this
     )
     
-    # (optimized) for cuda
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=True,
@@ -262,7 +252,7 @@ def fine_tune_model(model, tokenizer, train_dataset, eval_dataset, output_dir):
     print(f"\nTraining complete! Took {minutes}m {seconds:.1f}s")
     
     return trainer
-#optional grid search
+
 def grid_search_lr(model_class, tokenizer, train_dataset, eval_dataset, output_dir):
     '''
     Simple grid search over learning rates (1-2 epochs each)
@@ -346,7 +336,6 @@ def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top
         use_beam_search: If True, use beam search for more coherent outputs
     Returns:
         List of generated jokes
-    model.eval()
     '''
     
     # Encode prompt WITH attention mask
@@ -400,6 +389,78 @@ def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top
     
     return generated_jokes
 
+
+def evaluate(model, tokenizer, jokes, device):
+    '''
+    Evaluates the model via it's overall perplexity score, loss,
+    and accuracy
+    
+    Args:
+        model: Fine-tuned GPT-2 model
+        tokenizer: GPT-2 tokenizer
+        jokes: test jokes set to evaluate on
+        device: cpu or gpu, allows us to leverage gpu for efficient compute
+    Returns:
+        The perplexity, loss, and accuracy of the model as a dictionary
+    '''
+    model.eval()
+    total_loss = 0
+    total_tokens = 0
+    results = []
+    all_predictions = []
+    all_labels = []
+    
+    for joke in jokes:
+        inputs = tokenizer(joke + tokenizer.eos_token, return_tensors="pt").to(device)
+        
+        with torch.no_grad():
+            outputs = model(**inputs, labels=inputs["input_ids"])
+            loss = outputs.loss.item()
+            num_tokens = inputs["input_ids"].shape[1]
+            
+            # Get predictions (argmax of logits)
+            logits = outputs.logits  # Shape: [batch_size, seq_len, vocab_size]
+            predictions = torch.argmax(logits, dim=-1)  # Shape: [batch_size, seq_len]
+            pred_tokens = predictions[:, :-1].flatten().cpu().numpy()
+            label_tokens = inputs["input_ids"][:, 1:].flatten().cpu().numpy()
+            
+            # Calculate per-joke accuracy
+            joke_accuracy = (pred_tokens == label_tokens).mean()
+            
+            # Store for global metrics
+            all_predictions.extend(pred_tokens.tolist())
+            all_labels.extend(label_tokens.tolist())
+            
+            # Update totals
+            total_loss += loss * num_tokens
+            total_tokens += num_tokens
+            
+            results.append({
+                'joke': joke,
+                'loss': loss,
+                'ppl': math.exp(loss),
+                'accuracy': joke_accuracy,
+                'num_tokens': num_tokens
+            })
+    
+    # Calculate overall metrics
+    avg_loss = total_loss / total_tokens
+    avg_ppl = math.exp(avg_loss)
+    overall_accuracy = accuracy_score(all_labels, all_predictions)
+    
+    # Compile summary metrics
+    summary = {
+        'perplexity': avg_ppl,
+        'loss': avg_loss,
+        'accuracy': overall_accuracy,
+    }
+    
+    return summary
+
+
+'''
+
+'''
 if __name__ == "__main__":
     print()
     print("=" * 70)
@@ -416,27 +477,25 @@ if __name__ == "__main__":
                        help='Run grid search for learning rate before training')
     parser.add_argument('--app', action='store_true',
                        help='Terminal application')
+    parser.add_argument('--eval', action='store_true',
+                        help='Evaluate loaded or trained model')
     args = parser.parse_args()
     
     # Create models directory if it doesn't exist in the gpu repo area e.g. models/
     os.makedirs(MODEL_DIR, exist_ok=True)
     
     model_path = f"{MODEL_DIR}/gpt2-jokes-v3"
+
+    # Set device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Check if model exists gpu
     if os.path.exists(MODEL_DIR) and not args.train:
-        # print()
-        # print("\n" + "=" * 70)
-        # print("Loading existing fine-tuned model...")
-        # print("=" * 70)
-        # print()
-        
+
         tokenizer = GPT2Tokenizer.from_pretrained(MODEL_DIR)
         model = GPT2LMHeadModel.from_pretrained(MODEL_DIR)
         tokenizer.pad_token = tokenizer.eos_token
         
-        # Set device
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model = model.to(device)
         # print(f"Model loaded on device: {device}")        
     else:
@@ -468,9 +527,7 @@ if __name__ == "__main__":
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in model.parameters())
         print(f"Layer freezing: {frozen_layers}/12 layers frozen, {trainable:,}/{total:,} params trainable")
-        
-        # Set device
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
         model = model.to(device)
         print(f"Training on device: {device}")
         
@@ -517,6 +574,16 @@ if __name__ == "__main__":
         tokenizer.save_pretrained(model_path)
         print(f"Model saved to {model_path}")
 
+    # Evaluate model if prompted
+    if args.eval:
+        jokes = prepare_joke_data()
+        split_idx = int(len(jokes) * 0.95)
+        eval_jokes = jokes[split_idx:]
+        evaluation = evaluate(model, tokenizer, eval_jokes, device)
+        print("\n" + "=" * 70)
+        print("Model Evaluation")
+        print(evaluation)
+        print("=" * 70)
 
     # Terminal Program
     if args.app:
@@ -558,7 +625,7 @@ if __name__ == "__main__":
             model, 
             tokenizer, 
             prompt,
-            max_length=80,
+            max_length=120,
             num_return_sequences=1,
             use_beam_search=True
         )
