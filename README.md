@@ -9,7 +9,7 @@ was unsuccessfull, with our model unable to output coherent sounding sentences a
 produced terrible perplexity and accuracy scores. Our second attempt involved 
 fine tuning GPT2 via transfer learning techniques. This approach was much more successful,
 producing much more reasonable objective metrics. The instructions below explain
-the structure of our repository and the steps necessary to run our code
+the structure of our repository and the steps necessary to run our code.
 
 # Repo Structure
 
@@ -18,7 +18,7 @@ the structure of our repository and the steps necessary to run our code
 Our datasets can be found in the compressed_data directory. After cloning/forking this
 repository locally, your first step should be to create a new directory called
 'data' and extract all contents in compressed_data to this new directory. We discuss
-these datasets at length in our project report
+these datasets at length in our project report.
 
 ## Model Folders
 
