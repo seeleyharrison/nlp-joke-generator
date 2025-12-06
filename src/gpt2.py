@@ -11,7 +11,32 @@
     5) Evaluate performance of fine-tuned model
     6) Provide text generation functionality (through a terminal app or direct prompts)
 
-    RUN INSTRUCTIONS
+    RUN INSTRUCTIONS:
+    NOTE: All commands should be run from the root of the repository
+
+    1) Train a new model from scratch
+        python src/train_model.py --train
+    
+    2) Train with grid search
+        python train_model.py --grid-search
+    
+    3) Load pre-trained model and generates sample jokes
+        python train_model.py
+    
+    4) Custom prompt generation:
+        python train_model.py --prompt "Your custom prompt here"
+    
+    5) Evaluate model perplexity, loss, and accuracy on test set
+        python train_model.py --eval
+    
+    6) Interactive terminal app
+        python train_model.py --app
+
+    Options 2-5 will be run with the existing model by default. If you
+    would like to instead train a new model to run any of these options,
+    add the --train flag to the command. WARNING, THIS WILL OVERWRITE
+    THE EXISTING MODEL AND REPLACE IT WITH THE NEW MODEL YOU TRAIN
+    
 '''
 
 import warnings
@@ -65,6 +90,11 @@ class JokeDataset(Dataset):
     PyTorch's trainer class that is great for transfer learning training.
 
     This is essentially a variant of our data loader
+    
+    Args:
+        jokes (list): List of joke strings to be tokenized
+        tokenizer (GPT2Tokenizer): Tokenizer instance for encoding text
+        max_length (int): Maximum sequence length for truncation (default: MAX_LENGTH)
     '''
     def __init__(self, jokes, tokenizer, max_length=MAX_LENGTH):
         self.jokes = jokes
@@ -72,9 +102,22 @@ class JokeDataset(Dataset):
         self.max_length = max_length
     
     def __len__(self):
+        '''
+        Returns:
+            int: Total number of jokes in the dataset
+        '''
         return len(self.jokes)
     
     def __getitem__(self, idx):
+        '''
+        Retrieves and tokenizes a single joke
+        
+        Args:
+            idx (int): Index of the joke to retrieve
+        
+        Returns:
+            dict: Dictionary containing 'input_ids' and 'attention_mask' tensors
+        '''
         joke = self.jokes[idx]
         
         # Add eos token to end of the joke for gpt2 compatibilty
@@ -98,7 +141,16 @@ class JokeDataset(Dataset):
         }
 
 def prepare_joke_data():
-    '''Load jokes from CSV and TSV files with score filtering'''
+    '''
+    Load jokes from CSV and TSV files with score filtering
+    
+    Loads joke data from multiple sources (Kaggle CSV, rJokes TSVs, fullrjokes.json),
+    applies quality filters (minimum score, length constraints), cleans text,
+    and removes duplicates.
+    
+    Returns:
+        list: List of cleaned, filtered, and deduplicated joke strings
+    '''
     print("Loading joke data...")
     jokes = []
     
@@ -187,7 +239,21 @@ def prepare_joke_data():
 
 def fine_tune_model(model, tokenizer, train_dataset, eval_dataset, output_dir):
     '''
-        Fine-tune the GPT-2 model on joke data with validation
+    Fine-tune the GPT-2 model on joke data with validation
+    
+    Sets up training arguments with optimized hyperparameters, including cosine
+    learning rate scheduling, gradient clipping, and early stopping based on
+    evaluation loss.
+    
+    Args:
+        model (GPT2LMHeadModel): Pre-trained GPT-2 model to fine-tune
+        tokenizer (GPT2Tokenizer): Tokenizer for text encoding
+        train_dataset (JokeDataset): Training dataset
+        eval_dataset (JokeDataset): Evaluation dataset for validation
+        output_dir (str): Directory path to save model checkpoints and logs
+    
+    Returns:
+        Trainer: Trained Trainer instance with the fine-tuned model
     '''
     # Data collator for language modeling
     data_collator = DataCollatorForLanguageModeling(
@@ -256,7 +322,19 @@ def fine_tune_model(model, tokenizer, train_dataset, eval_dataset, output_dir):
 def grid_search_lr(model_class, tokenizer, train_dataset, eval_dataset, output_dir):
     '''
     Simple grid search over learning rates (1-2 epochs each)
-    Returns best learning rate based on eval loss
+    
+    Tests multiple learning rate values and selects the one with the lowest
+    evaluation loss. Each learning rate is tested with a fresh model instance.
+    
+    Args:
+        model_class (type): Model class to instantiate (GPT2LMHeadModel)
+        tokenizer (GPT2Tokenizer): Tokenizer for text encoding
+        train_dataset (JokeDataset): Training dataset
+        eval_dataset (JokeDataset): Evaluation dataset
+        output_dir (str): Directory path for temporary grid search outputs
+    
+    Returns:
+        float: Best learning rate based on evaluation loss
     '''
     lr_options = [1e-5, 2e-5, 3e-5]
     best_lr = LEARNING_RATE
@@ -323,19 +401,25 @@ def grid_search_lr(model_class, tokenizer, train_dataset, eval_dataset, output_d
 def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top_k=50, top_p=0.95, num_return_sequences=1, repetition_penalty=1.2, use_beam_search=True):
     '''
     Generate jokes using the fine-tuned model
+    
+    Supports two generation modes:
+    - Beam search: More coherent but less varied outputs
+    - Sampling: More creative but potentially less coherent outputs
+    
     Args:
-        model: Fine-tuned GPT-2 model
-        tokenizer: GPT-2 tokenizer
-        prompt: Starting text for generation
-        max_length: Maximum length of generated text
-        temperature: Sampling temperature (higher = more random)
-        top_k: Top-k sampling parameter
-        top_p: Nucleus sampling parameter
-        num_return_sequences: Number of jokes to generate
-        repetition_penalty: Penalty for repeating tokens (>1.0 = less repetition)
-        use_beam_search: If True, use beam search for more coherent outputs
+        model (GPT2LMHeadModel): Fine-tuned GPT-2 model
+        tokenizer (GPT2Tokenizer): GPT-2 tokenizer
+        prompt (str): Starting text for generation
+        max_length (int): Maximum length of generated text (default: 100)
+        temperature (float): Sampling temperature, higher = more random (default: 0.8)
+        top_k (int): Top-k sampling parameter (default: 50)
+        top_p (float): Nucleus sampling parameter (default: 0.95)
+        num_return_sequences (int): Number of jokes to generate (default: 1)
+        repetition_penalty (float): Penalty for repeating tokens, >1.0 = less repetition (default: 1.2)
+        use_beam_search (bool): If True, use beam search; if False, use sampling (default: True)
+    
     Returns:
-        List of generated jokes
+        list: List of generated joke strings
     '''
     
     # Encode prompt WITH attention mask
@@ -344,7 +428,6 @@ def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top
     # Move to same device as model
     device = next(model.parameters()).device
     input_ids = inputs['input_ids'].to(device)
-    attention_mask = inputs['attention_mask'].to(device)
     
     # Generate with beam search for coherent punchlines, or sampling for variety
     with torch.no_grad():
@@ -392,16 +475,19 @@ def generate_joke(model, tokenizer, prompt, max_length=100, temperature=0.8, top
 
 def evaluate(model, tokenizer, jokes, device):
     '''
-    Evaluates the model via it's overall perplexity score, loss,
-    and accuracy
+    Evaluates the model via its overall perplexity score, loss, and accuracy
+    
+    Processes each joke individually, computing token-level predictions and
+    comparing them to ground truth labels. Aggregates metrics across all jokes.
     
     Args:
-        model: Fine-tuned GPT-2 model
-        tokenizer: GPT-2 tokenizer
-        jokes: test jokes set to evaluate on
-        device: cpu or gpu, allows us to leverage gpu for efficient compute
+        model (GPT2LMHeadModel): Fine-tuned GPT-2 model
+        tokenizer (GPT2Tokenizer): GPT-2 tokenizer
+        jokes (list): Test jokes set to evaluate on
+        device (torch.device): CPU or GPU device for computation
+    
     Returns:
-        The perplexity, loss, and accuracy of the model as a dictionary
+        dict: Dictionary containing 'perplexity', 'loss', and 'accuracy' metrics
     '''
     model.eval()
     total_loss = 0
@@ -459,7 +545,7 @@ def evaluate(model, tokenizer, jokes, device):
 
 
 '''
-
+    Main program/entry point to run evaluation and text generation on our model
 '''
 if __name__ == "__main__":
     print()
