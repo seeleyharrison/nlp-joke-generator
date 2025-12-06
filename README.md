@@ -6,7 +6,7 @@ Our intention was to train a model with an "edgy" feel that responds with natura
 contemporary sounding jokes. We built two models to implement this functionality. We
 first built an LSTM RNN from scratch and trained the model on our datasets. This approach
 was unsuccessfull, with our model unable to output coherent sounding sentences and
-producing terrible perplexity and accuracy scores. Our second attempt involved 
+produced terrible perplexity and accuracy scores. Our second attempt involved 
 fine tuning GPT2 via transfer learning techniques. This approach was much more successful,
 producing much more reasonable objective metrics. The instructions below explain
 the structure of our repository and the steps necessary to run our code
